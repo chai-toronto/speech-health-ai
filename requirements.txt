@@ -1,0 +1,9 @@
+tqdm
+torchaudio
+torchcodec
+pandas
+datasets==3.6.0
+pyannote.audio
+librosa
+soundfile
+transformers
