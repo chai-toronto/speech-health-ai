@@ -1,26 +1,36 @@
 import re
 
 import torch
-from pyannote.audio.pipelines import VoiceActivityDetection
+from pyannote.audio.pipelines import VoiceActivityDetection, OverlappedSpeechDetection
 
 BETWEEN_SEGMENT = 0.15
 
-# instantiate the model
-from pyannote.audio import Model
-model = Model.from_pretrained(
-  "pyannote/segmentation-3.0")
-pipeline = VoiceActivityDetection(segmentation=model)
 HYPER_PARAMETERS = {
   # remove speech regions shorter than that many seconds.
   "min_duration_on": 0.0,
   # fill non-speech regions shorter than that many seconds.
   "min_duration_off": 0.0
 }
-pipeline.instantiate(HYPER_PARAMETERS)
 
-def vad_and_trim(waveform, sample_rate):
-    vad = pipeline({'waveform': waveform, 'sample_rate': sample_rate})
-    return trim_silence(waveform, sample_rate, str(vad))
+# instantiate the model
+from pyannote.audio import Model
+model = Model.from_pretrained(
+  "pyannote/segmentation-3.0")
+
+speech_pipeline = VoiceActivityDetection(segmentation=model)
+speech_pipeline.instantiate(HYPER_PARAMETERS)
+
+overlapped_pipeline = OverlappedSpeechDetection(segmentation=model)
+overlapped_pipeline.instantiate(HYPER_PARAMETERS)
+
+
+def find_speech_and_trim(waveform, sample_rate):
+    vad = speech_pipeline({'waveform': waveform, 'sample_rate': sample_rate})
+    return trim_speech(waveform, sample_rate, str(vad))
+
+def find_overlapped_and_trim(waveform, sample_rate):
+    overlapped = overlapped_pipeline({'waveform': waveform, 'sample_rate': sample_rate})
+    return trim_speech(waveform, sample_rate, str(overlapped), to_annotation=False)
 
 def parse_annotation(annotation_str):
     # Extract start and end times in seconds
@@ -35,18 +45,23 @@ def parse_annotation(annotation_str):
     return time_ranges
 
 
-def trim_silence(waveform, sample_rate, annotation_str):
+def trim_speech(waveform, sample_rate, annotation_str, to_annotation=True):
+    """If to_annotation is True, keep the annotated segments. Otherwise, remove them."""
     time_ranges = parse_annotation(annotation_str)
-    speech_segments = []
+
+    T = waveform.shape[1]
+    mask = torch.zeros(T, dtype=torch.bool) if to_annotation else torch.ones(T, dtype=torch.bool)
 
     for start_sec, end_sec in time_ranges:
-        start_sample = int(start_sec * sample_rate)
-        end_sample = int(end_sec * sample_rate)
-        speech_segments.append(waveform[:, start_sample:end_sample])
+        start_sample = max(0, int(start_sec * sample_rate))
+        end_sample = min(T, int(end_sec * sample_rate))
 
-    if speech_segments:
-        trimmed_waveform = torch.cat(speech_segments, dim=1)
-    else:
-        trimmed_waveform = torch.zeros((waveform.shape[0], 0))
+        if to_annotation:
+            mask[start_sample:end_sample] = True
+        else:
+            mask[start_sample:end_sample] = False
 
+    trimmed_waveform = waveform[:, mask]
     return trimmed_waveform
+
+

@@ -130,6 +130,6 @@ def read_audioset_csv(filepath):
 
     return df
 
-def resample(waveform, sr):
-    return torchaudio.transforms.Resample(sr, 16000)(waveform)
+def resample(waveform, sr, target_sr):
+    return torchaudio.transforms.Resample(sr, target_sr)(waveform)
 
