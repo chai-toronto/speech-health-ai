@@ -6,15 +6,15 @@ from pathlib import Path
 import torchaudio
 from tqdm import tqdm
 
-from src.data.lid import infer_lid_distribution
+from src.data.lid import infer_lid_distribution, trim_non_target_language
 from src.data.vad import find_speech_and_trim, find_overlapped_and_trim
 
 random.seed(1234)
 import argparse
 
-
-AUDIO_PATH = '/Volumes/LKieuData/VoxPopuli/unlabelled_data/en/'
-OUTPUT_PATH = f'/Users/lkieu/Desktop/VoxPopuli/exploratory'
+drive = '/media/larry/LKieuData'
+AUDIO_PATH = drive + '/VoxPopuli/unlabelled_data2/en/'
+OUTPUT_PATH = drive + '/VoxPopuli/exploratory'
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 SAMPLE_RATE = 16_000
 
@@ -61,11 +61,22 @@ if '__main__' == __name__:
             stats['Not English'].append(filename)
             continue
 
+        elif prob_eng < 0.9:
+            waveform_1d, _ = trim_non_target_language(waveform_1d, SAMPLE_RATE, 'eng')
+            if waveform_1d.shape[0] <= SAMPLE_RATE * 1:
+                continue
+            waveform = waveform_1d.unsqueeze(0)
+
         silence_trimmed = find_speech_and_trim(waveform, SAMPLE_RATE)
         stats['Silence trimmed'].append((waveform.shape[1] - silence_trimmed.shape[1])/waveform.shape[1])
 
-        overlapped_trimmed = find_overlapped_and_trim(waveform, SAMPLE_RATE)
-        stats['Overlapped trimmed'].append((waveform.shape[1] - overlapped_trimmed.shape[1])/waveform.shape[1])
+        overlapped_trimmed = find_overlapped_and_trim(silence_trimmed, SAMPLE_RATE)
+        stats['Overlapped trimmed'].append((waveform.shape[1] - overlapped_trimmed.shape[1] + silence_trimmed.shape[1])
+                                           /waveform.shape[1])
+
+        filename = os.path.basename(path)
+        output_path = os.path.join(args.output_path, filename)
+        torchaudio.save(output_path, waveform, SAMPLE_RATE)
 
     stats['Silence_avg'] = sum(stats['Silence trimmed']) / len(stats['Silence trimmed'])
     stats['Overlapped_avg'] = sum(stats['Overlapped trimmed']) / len(stats['Overlapped trimmed'])
@@ -74,7 +85,7 @@ if '__main__' == __name__:
     stats['Resampled'] = stats['Resampled'] if 'Resampled' in stats else 0
 
     # Save to json
-    with open(os.path.join(args.output_path, 'stats.json'), 'w') as f:
+    with open(os.path.join(args.output_path, 'stats_librivox_pass1.json'), 'w') as f:
         f.write(str(stats))
 
     print('done')

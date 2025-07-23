@@ -1,12 +1,14 @@
 import argparse
 import glob
+import json
 import os
+import random
 
 import numpy as np
 import pandas as pd
 import torchaudio
 from tqdm import tqdm
-
+import shutil
 
 from src.data.lid import trim_non_target_language, infer_lid_distribution
 from src.data.util import read_audioset_csv
@@ -15,13 +17,17 @@ from src.data.vad import find_overlapped_and_trim, find_speech_and_trim
 
 # AUDIO_PATH = '/Volumes/LKieuData/AudioSet/data/extracted'
 # OUTPUT_PATH = '/Volumes/LKieuData/AudioSet/data/processed'
-AUDIO_PATH = '/Users/lkieu/Desktop/Audioset/audio'
-OUTPUT_PATH = '/Users/lkieu/Desktop/Audioset/processed_final'
+drive = "/media/larry/55b84e27-f8a5-4823-9b85-197fc1c6075f/"
+AUDIO_PATH = drive + '/AudioSet/extracted'
+OUTPUT_PATH =  drive + '/AudioSet/100processed4'
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 
-METADATA = ['/Volumes/LKieuData/AudioSet/data/balanced_train_segments.csv',
-            '/Volumes/LKieuData/AudioSet/data/eval_segments.csv',
-            '/Volumes/LKieuData/AudioSet/data/unbalanced_train_segments.csv']
+METADATA = [drive + x for x in
+                ['/AudioSet/data/balanced_train_segments.csv',
+                '/AudioSet/data/eval_segments.csv',
+                '/AudioSet/data/unbalanced_train_segments.csv'
+                ]
+            ]
 
 SAMPLE_RATE = 16_000
 # For AudioSet, Speech and its subcategories
@@ -34,38 +40,48 @@ def convert_audio_set(audio_path):
 def has_allowed_tag(labels):
     return any(tag in labels for tag in ALLOWED_TAGS)
 
+def init_stat():
+    return {
+        'overlapped_trimmed': [],
+        'num_overlapped': 0,
+        'nonspeech_trimmed': [],
+        'num_nonspeech': 0,
+        'num_not_english': 0,
+        'not_english': [],
+        'eng_trimmed': [],
+        'num_eng_trimmed': 0,
+    }
+
 if '__main__' == __name__:
     parser = argparse.ArgumentParser()
     parser.add_argument('--audio_path', default=AUDIO_PATH)
     parser.add_argument('--output_path', default=OUTPUT_PATH)
     parser.add_argument('--metadata', default=METADATA, nargs='*')
+    parser.add_argument('--verbose', default=True, action='store_true')
 
     args = parser.parse_args()
-
-    # On the same subfolder of audio_path
-    if args.output_path == '':
-        args.output_path = os.path.dirname(args.audio_path)
 
     paths = convert_audio_set(args.audio_path)
 
     # Filter for speech tags
-    df = pd.concat([read_audioset_csv(file) for file in args.metadata])
+    # df = pd.concat([read_audioset_csv(file) for file in args.metadata])
+    #
+    # ytids_to_paths = {
+    #     os.path.splitext(os.path.basename(p))[0]: p for p in paths
+    # }
+    #
+    # ytids = list(ytids_to_paths.keys())
+    # df_filtered = df[df['YTID'].isin(ytids)].copy()
+    # df_filtered['has_allowed_tag'] = df_filtered['positive_labels'].apply(has_allowed_tag)
+    # df_result = df_filtered[df_filtered['has_allowed_tag']].copy()
+    #
+    # filtered_ytids = df_result['YTID'].tolist()
+    # filtered_paths = [ytids_to_paths[ytid] for ytid in filtered_ytids if ytid in ytids_to_paths]
 
-    ytids_to_paths = {
-        os.path.splitext(os.path.basename(p))[0]: p for p in paths
-    }
+    # Uniformly sample 100 files
+    filtered_paths = random.sample(paths, 100)
 
-    ytids = list(ytids_to_paths.keys())
-    df_filtered = df[df['YTID'].isin(ytids)].copy()
-    df_filtered['has_allowed_tag'] = df_filtered['positive_labels'].apply(has_allowed_tag)
-    df_result = df_filtered[df_filtered['has_allowed_tag']].copy()
-
-    filtered_ytids = df_result['YTID'].tolist()
-    filtered_paths = [ytids_to_paths[ytid] for ytid in filtered_ytids if ytid in ytids_to_paths]
-
-    english = 0
-    lang_trimmed = 0
-    trimmed = []
+    stats = init_stat()
     for path in tqdm(filtered_paths):
         waveform, sr = torchaudio.load(path) # shape (num_channel, T)
 
@@ -82,31 +98,38 @@ if '__main__' == __name__:
         waveform_1d = waveform.squeeze() # Shape (T)
         prob_eng = infer_lid_distribution(waveform_1d, SAMPLE_RATE)['eng']
         if prob_eng < 0.4:
+            stats['num_not_english'] += 1
+            stats['not_english'].append(path.split('/')[-1])
             continue
 
         elif prob_eng < 0.9:
             waveform_1d, _ = trim_non_target_language(waveform_1d, SAMPLE_RATE, 'eng')
             if waveform_1d.shape[0] <= SAMPLE_RATE * 1:
                 continue
-            lang_trimmed += 1
+            stats['num_eng_trimmed'] += 1
+            stats['eng_trimmed'].append(path.split('/')[-1])
             waveform = waveform_1d.unsqueeze(0)
 
-        english += 1
 
         # trimming silence
-        waveform = find_speech_and_trim(waveform, SAMPLE_RATE)
-        if waveform.shape[1] <= SAMPLE_RATE * 1:
+        silenced_trim = find_speech_and_trim(waveform, SAMPLE_RATE)
+        if silenced_trim.shape[1] <= SAMPLE_RATE * 1:
             continue
-        waveform = find_overlapped_and_trim(waveform, SAMPLE_RATE)
-        if waveform.shape[1] <= SAMPLE_RATE * 0.5:
+        if waveform.shape[1] - silenced_trim.shape[1] >= SAMPLE_RATE:
+            stats['nonspeech_trimmed'].append(path.split('/')[-1])
+            stats['num_nonspeech'] += 1
+
+        overlapped_trim = find_overlapped_and_trim(silenced_trim, SAMPLE_RATE)
+        if overlapped_trim.shape[1] <= SAMPLE_RATE * 0.5:
             continue
+        if silenced_trim.shape[1] - overlapped_trim.shape[1] >= SAMPLE_RATE:
+            stats['overlapped_trimmed'].append(path.split('/')[-1])
+            stats['num_overlapped'] += 1
+
         # stat and save
-        trimmed.append(((SAMPLE_RATE * 10) - waveform.shape[-1]) / SAMPLE_RATE)
         filename = os.path.basename(path)
         output_path = os.path.join(args.output_path, filename)
-        torchaudio.save(output_path, waveform, SAMPLE_RATE)
+        torchaudio.save(output_path, overlapped_trim, SAMPLE_RATE)
 
-    print(f"Average trimmed duration: {sum(trimmed) / len(trimmed):.2f} seconds")
-    print(f'Standard Deviation of trimmed: {np.std(trimmed):.2f} seconds')
-    print(f"Language trimmed: {lang_trimmed} / {len(filtered_paths)}")
-    print(f"English speechs found, resampled, mono and trimmed: {english} / {len(filtered_paths)}")
+    with open(os.path.join(args.output_path, 'stat.json'), 'w') as f:
+        json.dump(stats, f, indent=3)
