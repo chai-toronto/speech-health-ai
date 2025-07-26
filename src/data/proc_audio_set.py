@@ -19,7 +19,7 @@ from src.data.vad import find_overlapped_and_trim, find_speech_and_trim
 # OUTPUT_PATH = '/Volumes/LKieuData/AudioSet/data/processed'
 drive = "/media/larry/55b84e27-f8a5-4823-9b85-197fc1c6075f/"
 AUDIO_PATH = drive + '/AudioSet/extracted'
-OUTPUT_PATH =  drive + '/AudioSet/100processed4'
+OUTPUT_PATH =  drive + '/AudioSet/processed_final'
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 
 METADATA = [drive + x for x in
@@ -52,6 +52,11 @@ def init_stat():
         'num_eng_trimmed': 0,
     }
 
+
+def get_existing_files(output_path):
+    return [f for f in os.listdir(output_path) if f.endswith('.flac')]
+
+
 if '__main__' == __name__:
     parser = argparse.ArgumentParser()
     parser.add_argument('--audio_path', default=AUDIO_PATH)
@@ -61,28 +66,36 @@ if '__main__' == __name__:
 
     args = parser.parse_args()
 
+    existing_files = get_existing_files(args.output_path)
+
     paths = convert_audio_set(args.audio_path)
 
     # Filter for speech tags
-    # df = pd.concat([read_audioset_csv(file) for file in args.metadata])
-    #
-    # ytids_to_paths = {
-    #     os.path.splitext(os.path.basename(p))[0]: p for p in paths
-    # }
-    #
-    # ytids = list(ytids_to_paths.keys())
-    # df_filtered = df[df['YTID'].isin(ytids)].copy()
-    # df_filtered['has_allowed_tag'] = df_filtered['positive_labels'].apply(has_allowed_tag)
-    # df_result = df_filtered[df_filtered['has_allowed_tag']].copy()
-    #
-    # filtered_ytids = df_result['YTID'].tolist()
-    # filtered_paths = [ytids_to_paths[ytid] for ytid in filtered_ytids if ytid in ytids_to_paths]
+    df = pd.concat([read_audioset_csv(file) for file in args.metadata])
+
+    ytids_to_paths = {
+        os.path.splitext(os.path.basename(p))[0]: p for p in paths
+    }
+
+    ytids = list(ytids_to_paths.keys())
+    df_filtered = df[df['YTID'].isin(ytids)].copy()
+    df_filtered['has_allowed_tag'] = df_filtered['positive_labels'].apply(has_allowed_tag)
+    df_result = df_filtered[df_filtered['has_allowed_tag']].copy()
+
+    filtered_ytids = df_result['YTID'].tolist()
+    filtered_paths = [ytids_to_paths[ytid] for ytid in filtered_ytids if ytid in ytids_to_paths]
 
     # Uniformly sample 100 files
-    filtered_paths = random.sample(paths, 100)
+    filtered_paths = paths
 
     stats = init_stat()
     for path in tqdm(filtered_paths):
+        # stat and save
+        filename = os.path.basename(path)
+        if filename in existing_files:
+            existing_files.remove(filename)
+            continue
+
         waveform, sr = torchaudio.load(path) # shape (num_channel, T)
 
         # Monochannel
@@ -93,6 +106,21 @@ if '__main__' == __name__:
         if sr != SAMPLE_RATE:
             resampler = torchaudio.transforms.Resample(sr, SAMPLE_RATE)
             waveform = resampler(waveform)
+
+        # trimming silence
+        silenced_trim = find_speech_and_trim(waveform, SAMPLE_RATE)
+        if silenced_trim.shape[1] <= SAMPLE_RATE * 1:
+            continue
+        if waveform.shape[1] - silenced_trim.shape[1] >= SAMPLE_RATE:
+            stats['nonspeech_trimmed'].append(path.split('/')[-1])
+            stats['num_nonspeech'] += 1
+
+        overlapped_trim = find_overlapped_and_trim(silenced_trim, SAMPLE_RATE)
+        if overlapped_trim.shape[1] <= SAMPLE_RATE * 0.5:
+            continue
+        if silenced_trim.shape[1] - overlapped_trim.shape[1] >= SAMPLE_RATE:
+            stats['overlapped_trimmed'].append(path.split('/')[-1])
+            stats['num_overlapped'] += 1
 
         # Check English
         waveform_1d = waveform.squeeze() # Shape (T)
@@ -110,24 +138,6 @@ if '__main__' == __name__:
             stats['eng_trimmed'].append(path.split('/')[-1])
             waveform = waveform_1d.unsqueeze(0)
 
-
-        # trimming silence
-        silenced_trim = find_speech_and_trim(waveform, SAMPLE_RATE)
-        if silenced_trim.shape[1] <= SAMPLE_RATE * 1:
-            continue
-        if waveform.shape[1] - silenced_trim.shape[1] >= SAMPLE_RATE:
-            stats['nonspeech_trimmed'].append(path.split('/')[-1])
-            stats['num_nonspeech'] += 1
-
-        overlapped_trim = find_overlapped_and_trim(silenced_trim, SAMPLE_RATE)
-        if overlapped_trim.shape[1] <= SAMPLE_RATE * 0.5:
-            continue
-        if silenced_trim.shape[1] - overlapped_trim.shape[1] >= SAMPLE_RATE:
-            stats['overlapped_trimmed'].append(path.split('/')[-1])
-            stats['num_overlapped'] += 1
-
-        # stat and save
-        filename = os.path.basename(path)
         output_path = os.path.join(args.output_path, filename)
         torchaudio.save(output_path, overlapped_trim, SAMPLE_RATE)
 

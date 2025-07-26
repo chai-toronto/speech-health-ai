@@ -2,8 +2,14 @@ tqdm
 torchaudio
 torchcodec
 pandas
-datasets==3.6.0
+datasets
 pyannote.audio
 librosa
 soundfile
 transformers
+torch
+pyannote-core
+numpy
+ray
+matplotlib
+ipython
