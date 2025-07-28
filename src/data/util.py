@@ -133,3 +133,11 @@ def read_audioset_csv(filepath):
 def resample(waveform, sr, target_sr):
     return torchaudio.transforms.Resample(sr, target_sr)(waveform)
 
+def init_stat():
+    return {
+        'Silence trimmed': [],
+        'Overlapped trimmed': [],
+        'Not English': [],
+        'English trimmed': [],
+        'Trimmed': [],
+    }

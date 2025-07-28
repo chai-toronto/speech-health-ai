@@ -1,47 +1,50 @@
-import glob
+import argparse
 import json
 import os
-import random
-from pathlib import Path
 
-import torchaudio
+import torch
+from datasets import load_dataset, Audio
+import numpy as np
 from tqdm import tqdm
+import torchaudio
 
 from src.data.lid import infer_lid_distribution, trim_non_target_language
 from src.data.util import init_stat
 from src.data.vad import find_speech_and_trim, find_overlapped_and_trim
 
-random.seed(1234)
-import argparse
-
-drive = '/media/larry/LKieuData'
-AUDIO_PATH = drive + '/VoxPopuli/unlabelled_data2/en/'
-OUTPUT_PATH = drive + '/VoxPopuli/exploratory'
-os.makedirs(OUTPUT_PATH, exist_ok=True)
+INPUT_DIR = ''
+OUTPUT_DIR = '/Users/lkieu/Desktop/gigaspeech/processed100/'
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 SAMPLE_RATE = 16_000
 
-
-def convert_vox_populi(audio_path):
-    ogg_files = glob.glob(os.path.join(audio_path, '**', '*.ogg'), recursive=True)
-    return ogg_files
-
-
-if '__main__' == __name__:
+if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--audio_path', default=AUDIO_PATH)
-    parser.add_argument('--output_path', default=OUTPUT_PATH)
+    parser.add_argument('--input_path', default=INPUT_DIR)
+    parser.add_argument('--output_path', default=OUTPUT_DIR)
     args = parser.parse_args()
 
-    paths = convert_vox_populi(args.audio_path)
+    if args.input_path == '':
+        gs = load_dataset("speechcolab/gigaspeech", "xl", split="train", streaming=True).shuffle()
+    else:
+        gs = load_dataset("speechcolab/gigaspeech", "xl", split="train", cache_dir=args.input_dir, streaming=True).shuffle()
 
-    #pick out 100 random
-    random_paths = random.sample(paths, 100)
     stats = init_stat()
-    for path in tqdm(random_paths):
-        filename = os.path.basename(path)
-        waveform, sr = torchaudio.load(path)
 
-        # Monochannel
+    num_samples = np.inf
+    progress = tqdm(total=num_samples)
+    i = 0
+    cur = next(iter(gs))
+    while i < num_samples and cur is not None:
+        audio = Audio(cur['audio']).sampling_rate
+        waveform, sr = audio['array'], audio['sampling_rate']
+        filename = os.path.basename(audio['path'])
+
+        waveform = torch.from_numpy(waveform.astype(np.float32)).unsqueeze(0)
+
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(sr, 16000)
+            waveform = resampler(waveform)
+
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
@@ -75,23 +78,21 @@ if '__main__' == __name__:
             continue
         if silence_trim.shape[1] - overlap_trim.shape[1] >= SAMPLE_RATE:
             stats['Overlapped trimmed'].append(filename)
-
+        #TODO: silence first, then lang trimmed. Document all the hyperparam.
         stats['Trimmed'].append(1 - (overlap_trim.shape[1] / waveform.shape[1]))
-
-        filename = os.path.basename(path)
         output_path = os.path.join(args.output_path, filename)
         torchaudio.save(output_path, overlap_trim, SAMPLE_RATE)
+
+        i += 1
+        progress.update(1)
+        cur = next(iter(gs))
 
     # Save to json
     with open(os.path.join(args.output_path, 'stat.json'), 'w') as f:
         json.dump(stats, f, indent=3)
 
     print('done')
-
-
-
-
-
+    progress.close()
 
 
 
