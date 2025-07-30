@@ -1,13 +1,13 @@
 import argparse
-import os
-import traceback
-from datetime import datetime
+
 import csv
-import math
+
 from pathlib import Path
 import multiprocessing as mp
 import torchaudio
 import time
+
+from src.data.util import get_files, split_work
 
 # VAD Configuration
 BETWEEN_SEGMENT = 0.15
@@ -113,31 +113,7 @@ def worker_process(worker_id, file_paths, output_dir, device='cpu', gpu_id=0):
     print(f"[Worker-{worker_id}] Results saved to: {output_csv}")
 
 
-def split_work(file_paths, num_workers):
-    """Split file paths evenly among workers"""
-    chunk_size = math.ceil(len(file_paths) / num_workers)
-    chunks = []
 
-    for i in range(num_workers):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, len(file_paths))
-        chunk = file_paths[start_idx:end_idx]
-        if chunk:  # Only add non-empty chunks
-            chunks.append(chunk)
-
-    return chunks
-
-
-def get_files(root_path, extension):
-    """Get all audio files with specified extension from root directory"""
-    root = Path(root_path)
-
-    # Ensure extension starts with dot
-    if not extension.startswith('.'):
-        extension = '.' + extension
-
-    files = list(root.glob(f'**/*{extension}'))
-    return files
 
 
 def main():

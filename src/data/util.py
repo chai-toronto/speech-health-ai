@@ -1,12 +1,40 @@
 import glob
 import json
+import math
 import os
+from pathlib import Path
 from typing import Union, Optional
 
 import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
+
+
+def get_files(root_path, extension):
+    """Get all audio files with specified extension from root directory"""
+    root = Path(root_path)
+
+    # Ensure extension starts with dot
+    if not extension.startswith('.'):
+        extension = '.' + extension
+
+    files = list(root.glob(f'**/*{extension}'))
+    return files
+
+def split_work(file_paths, num_workers):
+    """Split file paths evenly among workers"""
+    chunk_size = math.ceil(len(file_paths) / num_workers)
+    chunks = []
+
+    for i in range(num_workers):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, len(file_paths))
+        chunk = file_paths[start_idx:end_idx]
+        if chunk:  # Only add non-empty chunks
+            chunks.append(chunk)
+
+    return chunks
 
 
 def exact_div(x, y):
