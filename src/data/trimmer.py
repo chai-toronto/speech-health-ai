@@ -1,3 +1,6 @@
+import argparse
+from datetime import datetime
+import pandas as pd
 import threading
 import time
 import queue
@@ -6,8 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import torchaudio
 
+from src.data.util import download_file, get_files
+
 # Adaptive configuration
-SAVE_QUEUE = queue.Queue(maxsize=12000)  # ~150GB RAM capacity
+QUEUE_SIZE = 16000
+SAVE_QUEUE = queue.Queue(maxsize=QUEUE_SIZE)  # ~150GB RAM capacity
 saver_threads = []
 scaling_lock = threading.Lock()
 active_savers = 0
@@ -33,7 +39,8 @@ class AdaptiveScaler:
 
         while not shutdown_event.is_set():
             queue_size = SAVE_QUEUE.qsize()
-            queue_pct = (queue_size / 12000) * 100
+            print(f'[{datetime.now()}] Queue: {queue_size:,} items')
+            queue_pct = (queue_size / QUEUE_SIZE) * 100
 
             # Scale up conditions
             if (queue_pct > 85 and self.current_savers < self.max_savers):
@@ -76,6 +83,7 @@ class AdaptiveScaler:
                 self.current_savers -= remove_count
                 self.scale_history.append(f"DOWN to {self.current_savers}")
 
+
 def adaptive_saver_worker(worker_id):
     """Adaptive saver worker that can scale down"""
     global active_savers
@@ -96,8 +104,7 @@ def adaptive_saver_worker(worker_id):
 
             chunk, sr, out_path = item
 
-            # Fast save (directories pre-created)
-            torchaudio.save(out_path, chunk.cpu(), sr)
+            torchaudio.save(out_path, chunk, sr)
             saved_count += 1
             idle_time = 0
 
@@ -115,10 +122,11 @@ def adaptive_saver_worker(worker_id):
             SAVE_QUEUE.task_done()
 
 
+
 def enhanced_segment(item, cuda=False, gpu_id=0):
     """Enhanced segment function with queue monitoring"""
     in_path, segments, out_root = item
-    name = Path(in_path).stem
+    file_name = Path(in_path).stem
 
     if cuda:
         import torch
@@ -136,8 +144,8 @@ def enhanced_segment(item, cuda=False, gpu_id=0):
             if cuda:
                 chunk = chunk.cpu()
 
-        out_path = Path(out_root) / f'{name}.ogg'
-        SAVE_QUEUE.put((chunk, sr, out_path.as_posix()))
+            out_path = Path(out_root) / f'{file_name}_{i}.ogg'
+            SAVE_QUEUE.put((chunk, sr, out_path.as_posix()))
 
     except Exception as e:
         print(f"Error processing {in_path}: {e}")
@@ -154,66 +162,51 @@ def get_adaptive(args):
 
     # Setup
     audio_root = Path(args.root)
-    out_root = Path(args.rootout) / ""
+    out_root = Path(args.rootout) / "unlabelled_data"
     out_root.mkdir(exist_ok=True, parents=True)
 
     # Load manifest
     print("Loading manifest...")
-    try:
-        manifest = get_metadata(out_root, args.subset)
-    except Exception:
-        manifest = get_metadata2(out_root, args.subset)
 
+    manifest = get_metadata_vox_pop(out_root, args.subset)
 
     # Build items list
     items = defaultdict(list)
     if args.cont:
+        print("Checking existing files...")
         existing_files = set(Path(p).name for p in
-                             out_root.glob('**/*.ogg'))
+                             get_files(out_root, args.ext_out))
         print(f"Found {len(existing_files)} existing files")
 
     for event_id, seg_no, start, end in manifest:
-        segment = f"{event_id}_{seg_no}.ogg"
+        segment = f"{event_id}_{seg_no}{args.ext_out.lower()}"
         if args.cont and segment in existing_files:
             continue
 
         lang, year = event_id.rsplit("_", 1)[1], event_id[:4]
-        path = audio_root / lang / year / f"{event_id}.ogg"
+        path = audio_root / lang / year / f"{event_id}{args.ext_in.lower()}"
         items[path.as_posix()].append((seg_no, float(start), float(end)))
 
     items_list = [(k, v, out_root.as_posix()) for k, v in items.items() if v]
 
+
     print(f"🚀 ADAPTIVE BEAST MODE:")
-    print(f"  Queue: 12000 items (~150GB RAM)")
+    print(f"  Queue: {QUEUE_SIZE} items (~150GB RAM)")
     print(f"  Initial savers: 16")
     print(f"  Max savers: 48")
     print(f"  Producers: {args.workers}")
     print(f"  Files to process: {len(items_list):,}")
 
+    init_savers = 16
     # Start adaptive system
-    scaler = AdaptiveScaler(min_savers=16, max_savers=48)
-    active_savers = 16
+    scaler = AdaptiveScaler(min_savers=init_savers, max_savers=init_savers)
+    active_savers = init_savers
 
     # Start initial savers
-    for i in range(16):
+    for i in range(init_savers):
         saver = threading.Thread(target=adaptive_saver_worker, args=(i,), daemon=True)
         saver.start()
         saver_threads.append(saver)
-
-    # Start adaptive monitor
-    monitor = scaler.start_monitoring()
-
-    # Progress monitoring
-    def progress_monitor():
-        while not shutdown_event.is_set():
-            queue_size = SAVE_QUEUE.qsize()
-            files_done = sum(1 for _ in out_root.glob('**/*.ogg'))
-            print(f"📊 Queue: {queue_size:,}/12000 ({queue_size / 120:.1f}%), "
-                  f"Files: {files_done:,}, Savers: {active_savers}")
-            time.sleep(30)
-
-    progress_thread = threading.Thread(target=progress_monitor, daemon=True)
-    progress_thread.start()
 
     # Run producers
     start_time = time.time()
@@ -251,7 +244,50 @@ def get_adaptive(args):
     print(f"  Scaling events: {scaler.scale_history}")
 
 
-# Usage
-if __name__ == "__main__":
+def get_metadata_vox_pop(out_root, subset):
+    """Only known to work with en_v2 subset"""
+    def predicate(id_):
+        return id_.endswith(subset.split("_")[0])
+
+    DOWNLOAD_BASE_URL = "https://dl.fbaipublicfiles.com/voxpopuli"
+    filename = "unlabelled_v2"
+
+    url = f"{DOWNLOAD_BASE_URL}/annotations/{filename}.tsv.gz"
+    tsv_path = out_root / f'{filename}.tsv'
+    if not tsv_path.exists():
+        download_file(url, out_root.as_posix(), Path(url).name)
+
+    df = pd.read_csv(tsv_path, sep='\t', usecols=["event_id", "segment_no", "start", "end"])
+    rows = df[df["event_id"].apply(predicate)][["event_id", "segment_no", "start", "end"]]
+    rows = list(rows.itertuples(index=False, name=None))
+
+    return rows
+
+
+def get_args():
+    parser = argparse.ArgumentParser("Prepare unlabelled data")
+    parser.add_argument(
+        "--root", "-r", type=str, help="data root path",
+        default='/Volumes/Kieu4TB/gigaspeech/gigaspeech/data/extracted/xl'
+    )
+    parser.add_argument("--rootout", "-o", type=str, help="output root path",
+                        default='/Volumes/Kieu4TB/gigaspeech/gigaspeech/data/trimmed/xl')
+
+    parser.add_argument("--workers", "-w", type=int, default=47,
+                        help="Total number of workers")
+    parser.add_argument("--gpu", "-g", type=int, default=None,
+                        help="GPU ID to dedicate to one worker (default: 0)")
+    parser.add_argument("--cont", '-c', default=False, action="store_true",
+                        help="Continue from existing segmented files (skip already processed ones).")
+    parser.add_argument("--ext-in", default='.wav')
+    parser.add_argument("--ext-out", default='.wav')
+    return parser.parse_args()
+
+
+def main():
     args = get_args()
     get_adaptive(args)
+
+
+if __name__ == "__main__":
+    main()

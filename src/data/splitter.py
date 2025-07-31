@@ -11,10 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 import torchaudio
 import torchaudio.transforms as T
 
-from src.data.util import get_files
+from src.data.util import get_files, copy_folder_structure
 
 # Global queue for chunks to be saved
-SAVE_QUEUE = Queue(maxsize=1000)
+SAVE_QUEUE = Queue(maxsize=28000)
 saver_threads = []
 shutdown_event = threading.Event()
 
@@ -62,12 +62,14 @@ def start_savers(num_savers=8):
     return saver_threads
 
 
-def process_audio_file(input_path, output_dir, target_sr=16000, chunk_duration=5.0):
+def process_audio_file(input_path, output_dir, input_dir, target_sr=16000, chunk_duration=5.0):
     """
     Process one audio file: resample if needed and split into chunks
     """
     input_path = Path(input_path)
     output_dir = Path(output_dir)
+    input_dir = Path(input_dir)
+    output_subdir = output_dir / input_path.relative_to(input_dir).parent
 
     try:
         # Load audio file
@@ -86,6 +88,7 @@ def process_audio_file(input_path, output_dir, target_sr=16000, chunk_duration=5
         num_chunks = (total_samples + chunk_samples - 1) // chunk_samples  # Ceiling division
 
         # Split into chunks and queue for saving
+        length_sec = total_samples / target_sr
         chunks_queued = 0
         for i in range(num_chunks):
             start_sample = i * chunk_samples
@@ -96,30 +99,39 @@ def process_audio_file(input_path, output_dir, target_sr=16000, chunk_duration=5
 
             # Create output filename
             output_filename = f"{input_path.stem}_chunk_{i:03d}.wav"
-            output_path = output_dir / output_filename
+            output_path = output_subdir / output_filename
 
             # Queue for saving
             SAVE_QUEUE.put((chunk.clone(), target_sr, str(output_path)))
             chunks_queued += 1
 
-        print(f"[Producer] {input_path.name}: Queued {chunks_queued} chunks ({chunk_duration}s each)")
-        return chunks_queued
+        return chunks_queued, length_sec
 
     except Exception as e:
         print(f"[Producer] Error processing {input_path}: {e}")
         return 0
 
 
-def split_audio_files(input_files, output_dir, num_producers=4, num_savers=8,
+def split_audio_files(input_files, output_dir, input_dir, num_producers=4, num_savers=8,
                       target_sr=16000, chunk_duration=5.0):
     """
     Main function to split multiple audio files concurrently
+
+    Args:
+        input_files: List of input file paths
+        output_dir: Output directory path
+        input_dir: Input directory path (for path replacement)
+        num_producers: Number of producer threads
+        num_savers: Number of saver threads
+        target_sr: Target sample rate
+        chunk_duration: Duration of each chunk in seconds
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
     print(f"🎵 Starting Audio Splitter:")
     print(f"  Input files: {len(input_files)}")
+    print(f"  Input dir: {input_dir}")
     print(f"  Output dir: {output_dir}")
     print(f"  Target sample rate: {target_sr}Hz")
     print(f"  Chunk duration: {chunk_duration}s")
@@ -132,18 +144,20 @@ def split_audio_files(input_files, output_dir, num_producers=4, num_savers=8,
     # Process files with producer threads
     start_time = time.time()
     total_chunks = 0
+    total_times = 0.0
 
     with ThreadPoolExecutor(max_workers=num_producers) as executor:
         # Submit all files for processing
         futures = [
-            executor.submit(process_audio_file, input_file, output_dir, target_sr, chunk_duration)
+            executor.submit(process_audio_file, input_file, output_dir, input_dir, target_sr, chunk_duration)
             for input_file in input_files
         ]
 
         # Collect results
         for i, future in enumerate(futures):
             try:
-                chunks_count = future.result()
+                chunks_count, length_sec = future.result()
+                total_times += length_sec
                 total_chunks += chunks_count
                 print(f"Completed {i + 1}/{len(input_files)} files")
             except Exception as e:
@@ -167,7 +181,8 @@ def split_audio_files(input_files, output_dir, num_producers=4, num_savers=8,
     print(f"\n✅ Audio Splitting Complete!")
     print(f"  Files processed: {len(input_files)}")
     print(f"  Total chunks created: {total_chunks}")
-    print(f"  Total time: {total_time:.1f}s")
+    print(f"  Recording processed: {total_times / 3600:.2f}h")
+    print(f"  Time spent splitting: {total_time:.1f}s")
     print(f"  Rate: {len(input_files) / total_time:.1f} files/sec")
     print(f"  Chunk rate: {total_chunks / total_time:.1f} chunks/sec")
 
@@ -177,15 +192,17 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Split audio files into 5-second chunks")
-    parser.add_argument("input", help="Input file or directory")
-    parser.add_argument("output", help="Output directory")
+    parser.add_argument("--input", help="Input file or directory",
+                        default='/Volumes/Kieu4TB/gigaspeech/gigaspeech/data/extracted/xl')
+    parser.add_argument("--output", help="Output directory",
+                        default='/Volumes/Kieu4TB/gigaspeech/gigaspeech/data/trimmed/xl')
     parser.add_argument("--duration", "-d", type=float, default=5.0,
                         help="Chunk duration in seconds (default: 5.0)")
     parser.add_argument("--sample-rate", "-sr", type=int, default=16000,
                         help="Target sample rate (default: 16000)")
-    parser.add_argument("--producers", "-p", type=int, default=4,
+    parser.add_argument("--producers", "-p", type=int, default=128,
                         help="Number of producer threads (default: 4)")
-    parser.add_argument("--savers", "-s", type=int, default=8,
+    parser.add_argument("--savers", "-s", type=int, default=64,
                         help="Number of saver threads (default: 8)")
     parser.add_argument("--ext_in", type=str, default=".wav")
 
@@ -193,13 +210,18 @@ def main():
 
     # Find input files
     input_path = Path(args.input)
+
     if input_path.is_file():
         input_files = [input_path]
+        input_dir = input_path.parent
     elif input_path.is_dir():
+        # Copy the structure of input dir.
+        copy_folder_structure(args.input, args.output)
         input_files = get_files(input_path, args.ext_in)
         if not input_files:
             print(f"No audio files found in {input_path}")
             return
+        input_dir = input_path
     else:
         print(f"Input path {input_path} does not exist")
         return
@@ -210,6 +232,7 @@ def main():
     split_audio_files(
         input_files=input_files,
         output_dir=args.output,
+        input_dir=input_dir,
         num_producers=args.producers,
         num_savers=args.savers,
         target_sr=args.sample_rate,

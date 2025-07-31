@@ -169,3 +169,44 @@ def init_stat():
         'English trimmed': [],
         'Trimmed': [],
     }
+
+
+import requests
+
+
+def download_file(url, output_dir, file_name):
+    """
+    Downloads a file from a given URL and saves it to the specified path.
+
+    Args:
+        url (str): URL of the file to download.
+        output_dir (str): Local path where the file will be saved.
+    """
+    response = requests.get(url, stream=True)
+    response.raise_for_status()  # Raise an error on bad status
+
+    output_path = os.path.join(output_dir, file_name)
+
+    with open(output_path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+    print(f"Downloaded to {output_path}")
+
+import os
+
+
+def copy_folder_structure(src, dst):
+    """
+    Recursively copies folder structure from `src` to `dst`, excluding files.
+    """
+    if not os.path.isdir(src):
+        raise ValueError(f"Source path '{src}' is not a directory.")
+
+    for root, dirs, _ in os.walk(src):
+        # Construct the destination path
+        rel_path = os.path.relpath(root, src)
+        dst_dir = os.path.join(dst, rel_path)
+
+        # Create directory if it doesn't exist
+        os.makedirs(dst_dir, exist_ok=True)
