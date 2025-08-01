@@ -193,18 +193,18 @@ def main():
 
     parser = argparse.ArgumentParser(description="Split audio files into 5-second chunks")
     parser.add_argument("--input", help="Input file or directory",
-                        default='/Volumes/Kieu4TB/gigaspeech/gigaspeech/data/extracted/xl')
+                        default=Path(r"D:\medium_trimmed"))
     parser.add_argument("--output", help="Output directory",
-                        default='/Volumes/Kieu4TB/gigaspeech/gigaspeech/data/trimmed/xl')
+                        default=Path(r"D:\medium_split"))
     parser.add_argument("--duration", "-d", type=float, default=5.0,
                         help="Chunk duration in seconds (default: 5.0)")
     parser.add_argument("--sample-rate", "-sr", type=int, default=16000,
                         help="Target sample rate (default: 16000)")
-    parser.add_argument("--producers", "-p", type=int, default=128,
+    parser.add_argument("--producers", "-p", type=int, default=512,
                         help="Number of producer threads (default: 4)")
-    parser.add_argument("--savers", "-s", type=int, default=64,
+    parser.add_argument("--savers", "-s", type=int, default=256,
                         help="Number of saver threads (default: 8)")
-    parser.add_argument("--ext_in", type=str, default=".wav")
+    parser.add_argument("--ext_in", type=str, default=".flac")
 
     args = parser.parse_args()
 
